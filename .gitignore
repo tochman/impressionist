@@ -11,3 +11,5 @@ Gemfile.lock
 gemfiles/*.lock
 *.swo
 *.swp
+.idea/
+/.idea/

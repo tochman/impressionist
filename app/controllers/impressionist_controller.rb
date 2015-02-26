@@ -3,7 +3,7 @@ require 'digest/sha2'
 module ImpressionistController
   module ClassMethods
     def impressionist(opts={})
-      before_filter { |c| c.impressionist_subapp_filter(opts)}
+      before_filter { |c| c.impressionist_subapp_filter opts }
     end
   end
 
@@ -13,7 +13,7 @@ module ImpressionistController
     end
 
     def impressionist(obj,message=nil,opts={})
-      if should_count_impression?(opts)
+      unless bypass
         if obj.respond_to?("impressionable?")
           if unique_instance?(obj, opts[:unique])
             obj.impressions.create(associative_create_statement({:message => message}))
@@ -30,17 +30,49 @@ module ImpressionistController
     end
 
     def impressionist_subapp_filter(opts = {})
-      if should_count_impression?(opts)
+      opts.assert_valid_keys(:actions, :action_name, :unique)
+
+      unique_opts = opts[:unique]
+
+      unless bypass
         actions = opts[:actions]
         actions.collect!{|a|a.to_s} unless actions.blank?
-        if (actions.blank? || actions.include?(action_name)) && unique?(opts[:unique])
-          Impression.create(direct_create_statement)
+        if (actions.blank? || actions.include?(action_name)) && unique?(unique_opts)
+          an = if opts[:action_name].present?
+            opts[:action_name].respond_to?(:call) ? opts[:action_name].call(self) : opts[:action_name]
+          end.presence || action_name
+          Impression.create(direct_create_statement(:action_name => an))
         end
       end
     end
 
-    protected
-
+    private
+    
+    def bypass
+      Impressionist::Bots::WILD_CARDS.each do |wild_card|
+        return true if request.user_agent and request.user_agent.downcase.include? wild_card
+      end
+      Impressionist::Bots::LIST.include? request.user_agent
+    end
+    
+    def unique_instance?(impressionable, unique_opts)
+      return unique_opts.blank? || impressionable.impressions.where(unique_query(unique_opts)).size == 0
+    end
+    
+    def unique?(unique_opts)
+      return unique_opts.blank? || Impression.where(unique_query(unique_opts)).size == 0
+    end
+    
+    # creates the query to check for uniqueness
+    def unique_query(unique_opts)
+      full_statement = direct_create_statement
+      # reduce the full statement to the params we need for the specified unique options
+      unique_opts.reduce({}) do |query, param|
+        query[param] = full_statement[param]
+        query
+      end
+    end
+    
     # creates a statment hash that contains default values for creating an impression via an AR relation.
     def associative_create_statement(query_params={})
       query_params.reverse_merge!(
@@ -53,56 +85,16 @@ module ImpressionistController
         :referrer => request.referer
         )
     end
-
-    private
-
-    def bypass
-      Impressionist::Bots.bot?(request.user_agent)
-    end
-
-    def should_count_impression?(opts)
-      !bypass && condition_true?(opts[:if]) && condition_false?(opts[:unless])
-    end
-
-    def condition_true?(condition)
-      condition.present? ? conditional?(condition) : true
-    end
-
-    def condition_false?(condition)
-      condition.present? ? !conditional?(condition) : true
-    end
-
-    def conditional?(condition)
-      condition.is_a?(Symbol) ? self.send(condition) : condition.call
-    end
-
-    def unique_instance?(impressionable, unique_opts)
-      return unique_opts.blank? || !impressionable.impressions.where(unique_query(unique_opts, impressionable)).exists?
-    end
-
-    def unique?(unique_opts)
-      return unique_opts.blank? || !Impression.where(unique_query(unique_opts)).exists?
-    end
-
-    # creates the query to check for uniqueness
-    def unique_query(unique_opts,impressionable=nil)
-      full_statement = direct_create_statement({},impressionable)
-      # reduce the full statement to the params we need for the specified unique options
-      unique_opts.reduce({}) do |query, param|
-        query[param] = full_statement[param]
-        query
-      end
-    end
-
+    
     # creates a statment hash that contains default values for creating an impression.
-    def direct_create_statement(query_params={},impressionable=nil)
+    def direct_create_statement(query_params={})
       query_params.reverse_merge!(
         :impressionable_type => controller_name.singularize.camelize,
-        :impressionable_id => impressionable.present? ? impressionable.id : params[:id]
+        :impressionable_id=> params[:id]
         )
       associative_create_statement(query_params)
     end
-
+    
     def session_hash
       # # careful: request.session_options[:id] encoding in rspec test was ASCII-8BIT
       # # that broke the database query for uniqueness. not sure if this is a testing only issue.
@@ -111,7 +103,7 @@ module ImpressionistController
       # # request.session_options[:id].encode("ISO-8859-1")
       request.session_options[:id]
     end
-
+    
     #use both @current_user and current_user helper
     def user_id
       user_id = @current_user ? @current_user.id : nil rescue nil
